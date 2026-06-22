@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Regulatory Intelligence</title>
+    <link rel="stylesheet" href="/static/styles.css?v=6" />
+  </head>
+  <body>
+    <section class="language-gate" id="languageGate" aria-label="Language preference">
+      <div class="language-dialog">
+        <div class="language-dialog-header">
+          <p class="eyebrow" data-i18n="gate_eyebrow">Welcome</p>
+          <h1 data-i18n="gate_title">Choose your preferred language</h1>
+          <p class="gate-copy" data-i18n="gate_copy">The app will answer in this language and use it for voice input. You can change it anytime.</p>
+        </div>
+        <div class="language-grid" id="startLanguageGrid">
+          <button type="button" data-language="english">English</button>
+          <button type="button" data-language="hindi">हिन्दी</button>
+          <button type="button" data-language="bengali">বাংলা</button>
+          <button type="button" data-language="gujarati">ગુજરાતી</button>
+          <button type="button" data-language="kannada">ಕನ್ನಡ</button>
+          <button type="button" data-language="malayalam">മലയാളം</button>
+          <button type="button" data-language="marathi">मराठी</button>
+          <button type="button" data-language="odia">ଓଡ଼ିଆ</button>
+          <button type="button" data-language="punjabi">ਪੰਜਾਬੀ</button>
+          <button type="button" data-language="tamil">தமிழ்</button>
+          <button type="button" data-language="telugu">తెలుగు</button>
+        </div>
+      </div>
+    </section>
+
+    <main class="app-shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" data-i18n="app_eyebrow">RAG Regulatory Intelligence</p>
+            <h1 data-i18n="app_title">Ask SEBI and RBI circulars</h1>
+          </div>
+          <div class="topbar-right">
+            <button class="language-trigger" id="languageTrigger" type="button" data-i18n="language_trigger">Language</button>
+            <div class="status-pill" id="statusPill" data-i18n="checking_index">Checking index</div>
+          </div>
+        </header>
+
+        <div class="workspace-body">
+          <section class="query-panel" aria-label="Query controls">
+            <div class="query-panel-inner">
+              <div class="field-block">
+                <div class="question-label-row">
+                  <label for="question" data-i18n="question_label">Question</label>
+                  <button class="voice-button" id="voiceButton" type="button" data-i18n="voice_btn">🎙 Voice</button>
+                </div>
+                <textarea id="question" rows="4" data-i18n-placeholder="placeholder"></textarea>
+              </div>
+            </div>
+
+            <div class="controls-divider"></div>
+
+            <div class="controls-section">
+              <div class="control-grid">
+                <fieldset>
+                  <legend data-i18n="domain_label">Domain</legend>
+                  <div class="segmented" id="domainGroup">
+                    <button type="button" class="segment active" data-domain="all" data-i18n="domain_all">All</button>
+                    <button type="button" class="segment" data-domain="SEBI">SEBI</button>
+                    <button type="button" class="segment" data-domain="RBI">RBI</button>
+                  </div>
+                </fieldset>
+
+                <fieldset>
+                  <legend data-i18n="provider_label">Answer Provider</legend>
+                  <div class="segmented" id="providerGroup">
+                    <button type="button" class="segment active" data-provider="ollama">Ollama</button>
+                    <button type="button" class="segment" data-provider="openai">OpenAI</button>
+                    <button type="button" class="segment" data-provider="retrieval_only" data-i18n="sources_only">Sources</button>
+                  </div>
+                </fieldset>
+
+                <label class="compact-field">
+                  <span data-i18n="topk_label">Top K</span>
+                  <input id="topK" type="number" min="1" max="8" value="2" />
+                </label>
+              </div>
+
+              <fieldset class="language-row">
+                <legend data-i18n="lang_label">Answer Language</legend>
+                <div class="language-chips" id="languageGroup">
+                  <button type="button" class="lang-chip active" data-language="english">English</button>
+                  <button type="button" class="lang-chip" data-language="hindi">हिन्दी</button>
+                  <button type="button" class="lang-chip" data-language="bengali">বাংলা</button>
+                  <button type="button" class="lang-chip" data-language="gujarati">ગુજરાતી</button>
+                  <button type="button" class="lang-chip" data-language="kannada">ಕನ್ನಡ</button>
+                  <button type="button" class="lang-chip" data-language="malayalam">മലയാളം</button>
+                  <button type="button" class="lang-chip" data-language="marathi">मराठी</button>
+                  <button type="button" class="lang-chip" data-language="odia">ଓଡ଼ିଆ</button>
+                  <button type="button" class="lang-chip" data-language="punjabi">ਪੰਜਾਬੀ</button>
+                  <button type="button" class="lang-chip" data-language="tamil">தமிழ்</button>
+                  <button type="button" class="lang-chip" data-language="telugu">తెలుగు</button>
+                </div>
+              </fieldset>
+
+              <div class="provider-settings">
+                <label class="compact-field">
+                  <span data-i18n="ollama_label">Ollama model</span>
+                  <input id="ollamaModel" value="qwen2.5-coder:7b" />
+                </label>
+                <label class="compact-field">
+                  <span data-i18n="openai_label">OpenAI model</span>
+                  <input id="openaiModel" value="gpt-4o-mini" />
+                </label>
+              </div>
+
+              <label class="check-row">
+                <input id="includeHf" type="checkbox" />
+                <span data-i18n="hf_label">Include Hugging Face RBI QA experimental data</span>
+              </label>
+            </div>
+
+            <div class="actions">
+              <button class="ghost-button" id="sampleButton" type="button" data-i18n="sample_btn">Use sample</button>
+              <button class="primary-button" id="askButton" type="button">
+                <span data-i18n="ask_btn">Ask</span>
+              </button>
+            </div>
+          </section>
+
+          <section class="answer-area" aria-live="polite">
+            <div class="empty-state" id="emptyState">
+              <h2 data-i18n="empty_title">Ready for a source-backed answer</h2>
+              <p data-i18n="empty_body">Select a domain, ask a question, and the system will retrieve matching chunks before generating a cited response.</p>
+            </div>
+
+            <div class="loading-state hidden" id="loadingState">
+              <div class="spinner"></div>
+              <div>
+                <h2 data-i18n="loading_title">Retrieving and drafting</h2>
+                <p data-i18n="loading_body">Local Ollama can take a minute or two. OpenAI will be faster once configured.</p>
+              </div>
+            </div>
+
+            <article class="answer-card hidden" id="answerCard">
+              <div class="answer-header">
+                <div>
+                  <p class="eyebrow" data-i18n="answer_eyebrow">Answer</p>
+                  <h2 id="answerTitle" data-i18n="answer_title">Generated response</h2>
+                </div>
+                <span class="status-pill subtle" id="providerBadge">Ollama</span>
+              </div>
+              <div class="answer-text" id="answerText"></div>
+            </article>
+          </section>
+        </div>
+      </section>
+
+      <aside class="source-rail">
+        <div class="rail-header">
+          <p class="eyebrow" data-i18n="sources_eyebrow">Sources</p>
+          <h2 data-i18n="sources_title">Retrieved context</h2>
+        </div>
+        <div class="sources-list" id="sourcesList"></div>
+      </aside>
+    </main>
+
+    <script src="/static/app.js?v=6"></script>
+  </body>
+</html>
