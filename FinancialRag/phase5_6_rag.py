@@ -1,13 +1,5 @@
 """
 Phase 5 and 6: hybrid retrieval plus source-grounded answer generation.
-
-Run examples:
-    python phase5_6_rag.py "What is the rating process for credit rating agencies?"
-    python phase5_6_rag.py "What does RBI say about P2P lending?" --domain RBI
-    python phase5_6_rag.py "Explain debenture trustee duties" --no-llm
-
-Set OPENAI_API_KEY to enable answer generation. Without it, the script still
-performs retrieval and prints the grounded prompt/context.
 """
 
 from __future__ import annotations
@@ -23,7 +15,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Generator, Iterable
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -55,6 +47,11 @@ LANGUAGE_NAMES = {
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
+
+# ── Module-level caches (loaded once, reused across all requests) ──────────────
+_model_cache: dict = {}          # keyed by model_name
+_chroma_client_cache: dict = {}  # keyed by index_dir path
+_chunks_cache: dict = {}         # keyed by (domain, include_hf)
 
 
 @dataclass
@@ -109,6 +106,23 @@ def load_hf_index_config() -> dict:
         return json.load(f)
 
 
+def _get_embedding_model(model_name: str):
+    """Return a cached SentenceTransformer, loading it only on first call."""
+    if model_name not in _model_cache:
+        from sentence_transformers import SentenceTransformer
+        _model_cache[model_name] = SentenceTransformer(model_name)
+    return _model_cache[model_name]
+
+
+def _get_chroma_client(index_dir: Path):
+    """Return a cached ChromaDB client for the given index directory."""
+    key = str(index_dir)
+    if key not in _chroma_client_cache:
+        import chromadb
+        _chroma_client_cache[key] = chromadb.PersistentClient(path=str(index_dir))
+    return _chroma_client_cache[key]
+
+
 def load_semantic_dependencies():
     try:
         import chromadb
@@ -125,7 +139,7 @@ def tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9][a-z0-9./_-]*", text.lower())
 
 
-def load_chunks(domain: str | None = None) -> list[RetrievedChunk]:
+def _load_chunks_from_disk(domain: str | None = None) -> list[RetrievedChunk]:
     pattern = str(CHUNKS_DIR / "**" / "chunks_*.json")
     chunks: list[RetrievedChunk] = []
     for path in glob.glob(pattern, recursive=True):
@@ -145,7 +159,15 @@ def load_chunks(domain: str | None = None) -> list[RetrievedChunk]:
     return chunks
 
 
-def load_hf_chunks(domain: str | None = None) -> list[RetrievedChunk]:
+def load_chunks(domain: str | None = None) -> list[RetrievedChunk]:
+    """Load chunks from cache; fall back to disk on first access."""
+    key = domain or "all"
+    if key not in _chunks_cache:
+        _chunks_cache[key] = _load_chunks_from_disk(domain)
+    return _chunks_cache[key]
+
+
+def _load_hf_chunks_from_disk(domain: str | None = None) -> list[RetrievedChunk]:
     if domain and domain != "RBI":
         return []
     if not HF_CHUNKS_DIR.exists():
@@ -164,6 +186,38 @@ def load_hf_chunks(domain: str | None = None) -> list[RetrievedChunk]:
                 )
             )
     return chunks
+
+
+def load_hf_chunks(domain: str | None = None) -> list[RetrievedChunk]:
+    key = f"hf_{domain or 'all'}"
+    if key not in _chunks_cache:
+        _chunks_cache[key] = _load_hf_chunks_from_disk(domain)
+    return _chunks_cache[key]
+
+
+def warm_up_caches() -> None:
+    """Pre-load the embedding model and chunk corpus at server startup."""
+    if not INDEX_INFO.exists():
+        return
+    try:
+        with open(_long_path(INDEX_INFO), "r", encoding="utf-8") as f:
+            info = json.load(f)
+        model_name = info["model_name"]
+        print(f"[startup] Loading embedding model: {model_name}", flush=True)
+        _get_embedding_model(model_name)
+        print("[startup] Embedding model ready.", flush=True)
+
+        print("[startup] Pre-loading chunk corpus...", flush=True)
+        load_chunks(None)
+        load_chunks("SEBI")
+        load_chunks("RBI")
+        print(f"[startup] Chunk corpus ready ({len(_chunks_cache)} domain slices).", flush=True)
+
+        print("[startup] Connecting ChromaDB client...", flush=True)
+        _get_chroma_client(INDEX_DIR)
+        print("[startup] ChromaDB ready.", flush=True)
+    except Exception as exc:
+        print(f"[startup] warm_up_caches failed (non-fatal): {exc}", flush=True)
 
 
 def bm25_search(query: str, chunks: list[RetrievedChunk], top_k: int) -> list[RetrievedChunk]:
@@ -230,13 +284,13 @@ def semantic_search(
 ) -> list[RetrievedChunk]:
     if not index_info.exists():
         return []
-    chromadb, SentenceTransformer = load_semantic_dependencies()
     with open(_long_path(index_info), "r", encoding="utf-8") as f:
         info = json.load(f)
-    model = SentenceTransformer(info["model_name"])
+
+    model = _get_embedding_model(info["model_name"])
     query_embedding = model.encode(QUERY_PREFIX + query, normalize_embeddings=True)
 
-    client = chromadb.PersistentClient(path=str(index_dir))
+    client = _get_chroma_client(index_dir)
     collection = client.get_collection(info.get("collection_name", default_collection))
     kwargs = {
         "query_embeddings": [query_embedding.tolist()],
@@ -299,7 +353,7 @@ def retrieve(
             default_collection=HF_COLLECTION_NAME,
         )
         semantic_sets.append(hf_semantic)
-        lexical_corpus.extend(load_hf_chunks(normalized_domain))
+        lexical_corpus = list(lexical_corpus) + list(load_hf_chunks(normalized_domain))
 
     lexical = bm25_search(query, lexical_corpus, top_k=max(top_k, 8))
     return merge_results(*semantic_sets, lexical, limit=top_k)
@@ -362,35 +416,30 @@ def normalize_language(language: str | None) -> str:
         "telugu": "telugu",
     }
     if value not in aliases:
-        raise ValueError("language must be one of: auto, english, hindi, bengali, gujarati, kannada, malayalam, marathi, odia, punjabi, tamil, telugu")
+        raise ValueError(
+            "language must be one of: auto, english, hindi, bengali, gujarati, "
+            "kannada, malayalam, marathi, odia, punjabi, tamil, telugu"
+        )
     return aliases[value]
 
 
 def detect_question_language(question: str) -> str:
-    bengali = sum(1 for char in question if "\u0980" <= char <= "\u09ff")
-    devanagari = sum(1 for char in question if "\u0900" <= char <= "\u097f")
-    gujarati = sum(1 for char in question if "\u0a80" <= char <= "\u0aff")
-    kannada = sum(1 for char in question if "\u0c80" <= char <= "\u0cff")
-    malayalam = sum(1 for char in question if "\u0d00" <= char <= "\u0d7f")
-    odia = sum(1 for char in question if "\u0b00" <= char <= "\u0b7f")
-    punjabi = sum(1 for char in question if "\u0a00" <= char <= "\u0a7f")
-    tamil = sum(1 for char in question if "\u0b80" <= char <= "\u0bff")
-    telugu = sum(1 for char in question if "\u0c00" <= char <= "\u0c7f")
+    bengali   = sum(1 for c in question if "ঀ" <= c <= "৿")
+    devanagari = sum(1 for c in question if "ऀ" <= c <= "ॿ")
+    gujarati  = sum(1 for c in question if "઀" <= c <= "૿")
+    kannada   = sum(1 for c in question if "ಀ" <= c <= "೿")
+    malayalam = sum(1 for c in question if "ഀ" <= c <= "ൿ")
+    odia      = sum(1 for c in question if "଀" <= c <= "୿")
+    punjabi   = sum(1 for c in question if "਀" <= c <= "੿")
+    tamil     = sum(1 for c in question if "஀" <= c <= "௿")
+    telugu    = sum(1 for c in question if "ఀ" <= c <= "౿")
     counts = {
-        "bengali": bengali,
-        "hindi": devanagari,
-        "gujarati": gujarati,
-        "kannada": kannada,
-        "malayalam": malayalam,
-        "odia": odia,
-        "punjabi": punjabi,
-        "tamil": tamil,
-        "telugu": telugu,
+        "bengali": bengali, "hindi": devanagari, "gujarati": gujarati,
+        "kannada": kannada, "malayalam": malayalam, "odia": odia,
+        "punjabi": punjabi, "tamil": tamil, "telugu": telugu,
     }
     language, count = max(counts.items(), key=lambda item: item[1])
-    if count > 0:
-        return language
-    return "english"
+    return language if count > 0 else "english"
 
 
 def build_messages(
@@ -435,6 +484,26 @@ def generate_answer(
     return response.choices[0].message.content or ""
 
 
+def generate_answer_stream_openai(
+    question: str,
+    chunks: list[RetrievedChunk],
+    model: str = DEFAULT_LLM_MODEL,
+    answer_language: str = "english",
+) -> Generator[str, None, None]:
+    from openai import OpenAI
+    client = OpenAI()
+    stream = client.chat.completions.create(
+        model=model,
+        messages=build_messages(question, chunks, answer_language),
+        temperature=0.1,
+        stream=True,
+    )
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
+
+
 def generate_ollama_answer(
     question: str,
     chunks: list[RetrievedChunk],
@@ -442,13 +511,23 @@ def generate_ollama_answer(
     timeout: int = 600,
     answer_language: str = "english",
 ) -> str:
+    return "".join(generate_ollama_answer_stream(question, chunks, model, timeout, answer_language))
+
+
+def generate_ollama_answer_stream(
+    question: str,
+    chunks: list[RetrievedChunk],
+    model: str = DEFAULT_OLLAMA_MODEL,
+    timeout: int = 600,
+    answer_language: str = "english",
+) -> Generator[str, None, None]:
     payload = {
         "model": model,
         "messages": build_messages(question, chunks, answer_language),
-        "stream": False,
+        "stream": True,
         "options": {
             "temperature": 0.1,
-            "num_ctx": 8192,
+            "num_ctx": 4096,
         },
     }
     request = urllib.request.Request(
@@ -459,20 +538,29 @@ def generate_ollama_answer(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            for raw_line in response:
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                content = data.get("message", {}).get("content", "")
+                if content:
+                    yield content
+                if data.get("done"):
+                    break
     except TimeoutError as exc:
         raise RuntimeError(
-            f"Ollama did not finish within {timeout} seconds. Try a lower --top-k, "
-            "increase --ollama-timeout, or use a smaller/faster local model."
+            f"Ollama did not finish within {timeout} seconds. "
+            "Try a lower top-k, increase ollama-timeout, or use a smaller model."
         ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(
             "Could not reach Ollama at http://localhost:11434. "
             "Start Ollama and make sure the model is available."
         ) from exc
-
-    message = data.get("message", {})
-    return message.get("content", "")
 
 
 def translate_question_openai(question: str, target_language: str = "english", model: str = DEFAULT_LLM_MODEL) -> str:
@@ -518,7 +606,7 @@ def translate_question_ollama(
             {"role": "user", "content": question},
         ],
         "stream": False,
-        "options": {"temperature": 0},
+        "options": {"temperature": 0, "num_ctx": 2048},
     }
     request = urllib.request.Request(
         OLLAMA_CHAT_URL,
@@ -532,7 +620,6 @@ def translate_question_ollama(
 
 
 def generate_mock_answer(question: str, chunks: list[RetrievedChunk], max_points: int = 5) -> str:
-    """Free offline answer generator for testing the Phase 6 citation path."""
     query_terms = set(tokenize(question))
     selected: list[tuple[int, str]] = []
 
@@ -557,17 +644,12 @@ def generate_mock_answer(question: str, chunks: list[RetrievedChunk], max_points
     if not selected:
         return "The retrieved context does not contain enough direct information to answer this question."
 
-    lines = [
-        "Offline Phase 6 test answer:",
-        "",
-        "Based only on the retrieved context:",
-    ]
+    lines = ["Offline Phase 6 test answer:", "", "Based only on the retrieved context:"]
     for source_index, sentence in selected:
         lines.append(f"- {sentence} [S{source_index}]")
-
     lines.append("")
     lines.append("Sources:")
-    seen = set()
+    seen: set[int] = set()
     for source_index, _ in selected:
         if source_index in seen:
             continue
@@ -587,29 +669,15 @@ def print_retrieval(chunks: list[RetrievedChunk]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase 5/6 RAG query runner")
     parser.add_argument("question", help="User question to answer")
-    parser.add_argument("--domain", default="all", help="all, SEBI, RBI, or IncomeTax")
-    parser.add_argument("--top-k", type=int, default=8, help="number of chunks to send to the answer step")
-    parser.add_argument("--include-hf-experimental", action="store_true", help="include separately indexed Hugging Face RBI QA data")
-    parser.add_argument("--model", default=DEFAULT_LLM_MODEL, help="OpenAI chat model for Phase 6")
-    parser.add_argument(
-        "--provider",
-        choices=["openai", "ollama"],
-        default="openai",
-        help="LLM provider for Phase 6",
-    )
-    parser.add_argument(
-        "--ollama-model",
-        default=DEFAULT_OLLAMA_MODEL,
-        help="local Ollama model for Phase 6",
-    )
-    parser.add_argument(
-        "--ollama-timeout",
-        type=int,
-        default=600,
-        help="seconds to wait for a local Ollama answer",
-    )
-    parser.add_argument("--no-llm", action="store_true", help="only run retrieval and print context")
-    parser.add_argument("--mock-llm", action="store_true", help="test Phase 6 locally without a paid API call")
+    parser.add_argument("--domain", default="all")
+    parser.add_argument("--top-k", type=int, default=8)
+    parser.add_argument("--include-hf-experimental", action="store_true")
+    parser.add_argument("--model", default=DEFAULT_LLM_MODEL)
+    parser.add_argument("--provider", choices=["openai", "ollama"], default="openai")
+    parser.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL)
+    parser.add_argument("--ollama-timeout", type=int, default=600)
+    parser.add_argument("--no-llm", action="store_true")
+    parser.add_argument("--mock-llm", action="store_true")
     args = parser.parse_args()
 
     chunks = retrieve(args.question, args.domain, args.top_k, args.include_hf_experimental)
@@ -623,16 +691,20 @@ def main() -> None:
     if args.no_llm or not os.getenv("OPENAI_API_KEY"):
         if args.provider == "ollama" and not args.no_llm:
             print("\nAnswer:\n")
-            print(generate_ollama_answer(args.question, chunks, args.ollama_model, args.ollama_timeout))
+            for token in generate_ollama_answer_stream(args.question, chunks, args.ollama_model, args.ollama_timeout):
+                print(token, end="", flush=True)
+            print()
             return
-        print("\nLLM generation skipped. Set OPENAI_API_KEY and omit --no-llm to run Phase 6.")
+        print("\nLLM generation skipped.")
         print("\nGrounded prompt context:\n")
         print(build_context(chunks))
         return
 
     print("\nAnswer:\n")
     if args.provider == "ollama":
-        print(generate_ollama_answer(args.question, chunks, args.ollama_model, args.ollama_timeout))
+        for token in generate_ollama_answer_stream(args.question, chunks, args.ollama_model, args.ollama_timeout):
+            print(token, end="", flush=True)
+        print()
     else:
         print(generate_answer(args.question, chunks, args.model))
 

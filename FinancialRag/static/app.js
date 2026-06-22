@@ -579,31 +579,77 @@ async function askQuestion() {
     return;
   }
   setBusy(true);
+
+  const body = JSON.stringify({
+    question,
+    domain_filter: state.domain,
+    provider: state.provider,
+    answer_language: state.language,
+    top_k: Number(topKEl.value || 2),
+    include_hf_experimental: includeHfEl.checked,
+    ollama_model: ollamaModelEl.value.trim() || "qwen2.5-coder:7b",
+    openai_model: openaiModelEl.value.trim() || "gpt-4o-mini",
+    ollama_timeout: 900,
+  });
+
   try {
-    const response = await fetch("/query", {
+    const response = await fetch("/query/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        question,
-        domain_filter: state.domain,
-        provider: state.provider,
-        answer_language: state.language,
-        top_k: Number(topKEl.value || 2),
-        include_hf_experimental: includeHfEl.checked,
-        ollama_model: ollamaModelEl.value.trim() || "qwen2.5-coder:7b",
-        openai_model: openaiModelEl.value.trim() || "gpt-4o-mini",
-        ollama_timeout: 900,
-      }),
+      body,
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || "Query failed.");
-    answerCard.classList.remove("hidden");
-    answerText.textContent = payload.answer;
-    providerBadge.textContent = payload.provider;
-    renderSources(payload.sources || []);
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({ detail: "Query failed." }));
+      throw new Error(err.detail || "Query failed.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let answerAccum = "";
+    let sourcesRendered = false;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE lines: "data: {...}\n\n"
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop(); // keep incomplete tail
+
+      for (const part of parts) {
+        const line = part.trim();
+        if (!line.startsWith("data: ")) continue;
+        let event;
+        try { event = JSON.parse(line.slice(6)); } catch { continue; }
+
+        if (event.type === "sources") {
+          // Sources arrive first — render them immediately
+          renderSources(event.sources || []);
+          providerBadge.textContent = state.provider;
+          sourcesRendered = true;
+          // Show answer card with empty text so user knows something is coming
+          answerCard.classList.remove("hidden");
+          answerText.textContent = "";
+          loadingState.classList.add("hidden");
+          setBusy(false); // re-enable controls; streaming continues in background
+        } else if (event.type === "token") {
+          answerAccum += event.token;
+          answerText.textContent = answerAccum;
+        } else if (event.type === "error") {
+          showError(event.message || "An error occurred.");
+          break;
+        }
+        // "done" type: nothing to do
+      }
+    }
+    if (!sourcesRendered) {
+      answerCard.classList.remove("hidden");
+      answerText.textContent = answerAccum;
+    }
   } catch (error) {
     showError(error.message);
-  } finally {
     setBusy(false);
     loadingState.classList.add("hidden");
   }
