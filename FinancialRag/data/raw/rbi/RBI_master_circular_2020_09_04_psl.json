@@ -1,0 +1,14 @@
+{
+  "filename": "RBI_master_circular_2020_09_04_psl.pdf.pdf",
+  "domain": "RBI",
+  "document_type": "Master Circular",
+  "circular_number": "RBI/RBI_master_circular_2020_09_04_psl",
+  "title": "psl",
+  "date": "2020-09-04",
+  "source_url": "https://rbi.org.in/Scripts/NotificationUser.aspx",
+  "downloaded_at": "2026-06-22",
+  "trusted_official_source": true,
+  "is_scanned": false,
+  "is_english": true,
+  "notes": "added via ingest_new_circulars.py"
+}

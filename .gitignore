@@ -10,6 +10,10 @@ env/
 vector_store.zip
 vector_store/
 
+# Generated chunk/index data (large, reproducible)
+FinancialRag/data/chunks/
+FinancialRag/data/index/
+
 # IDE / OS
 .vscode/
 .idea/
