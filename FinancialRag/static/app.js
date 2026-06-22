@@ -629,12 +629,12 @@ async function askQuestion() {
           renderSources(event.sources || []);
           providerBadge.textContent = state.provider;
           sourcesRendered = true;
-          // Show answer card with empty text so user knows something is coming
           answerCard.classList.remove("hidden");
-          answerText.textContent = "";
+          answerText.innerHTML = '<span class="generating-indicator"><span></span><span></span><span></span></span>';
           loadingState.classList.add("hidden");
           setBusy(false); // re-enable controls; streaming continues in background
         } else if (event.type === "token") {
+          if (!answerAccum) answerText.textContent = ""; // clear the dots on first token
           answerAccum += event.token;
           answerText.textContent = answerAccum;
         } else if (event.type === "error") {
